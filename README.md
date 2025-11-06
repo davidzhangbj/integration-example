@@ -1,6 +1,6 @@
-# FlinkOMT Demo - StarRocks to OceanBase
+# Integration - Example
 
-这是一个 Web 界面的 FlinkOMT 演示项目，可以帮助用户快速了解和使用 FlinkOMT 进行 StarRocks 到 OceanBase 的数据同步。
+这是一个 Web 界面的集成演示项目，可以帮助用户快速了解和使用 FlinkOMT 进行 StarRocks 到 OceanBase 的数据同步。
 
 ## 功能特性
 
