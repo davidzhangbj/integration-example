@@ -1,0 +1,60 @@
+version: '3.8'
+
+services:
+  # 前端服务
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - VITE_API_URL=http://localhost:5000
+    volumes:
+      - ./src:/app/src
+    depends_on:
+      - backend
+
+  # 后端服务
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    ports:
+      - "5000:5000"
+    environment:
+      - FLINK_HOME=/opt/flink
+      - FLINK_REST_URL=http://flink-jobmanager:8081
+    volumes:
+      - ./backend:/app
+      - ./config:/app/config
+      - /tmp:/tmp
+    depends_on:
+      - flink-jobmanager
+
+  # Flink JobManager
+  flink-jobmanager:
+    image: flink:1.17
+    ports:
+      - "8081:8081"
+    command: jobmanager
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.numberOfTaskSlots: 2
+        parallelism.default: 1
+
+  # Flink TaskManager
+  flink-taskmanager:
+    image: flink:1.17
+    depends_on:
+      - flink-jobmanager
+    command: taskmanager
+    scale: 1
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.numberOfTaskSlots: 2
+
