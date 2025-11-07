@@ -715,7 +715,23 @@ function FlinkOMTPage() {
 
         {/* Info Card */}
         <div className="mt-6 bg-white rounded-lg shadow-xl p-6 max-w-6xl mx-auto">
-          <h3 className="text-lg font-semibold mb-3 text-gray-800">关于 FlinkOMT</h3>
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-lg font-semibold text-gray-800">关于 FlinkOMT</h3>
+            <a
+              href="https://www.oceanbase.com/docs/common-oceanbase-database-cn-1000000003487323"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center text-blue-600 hover:text-blue-800 transition-colors text-sm font-medium"
+            >
+              <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+              </svg>
+              查看文档
+              <svg className="w-3 h-3 ml-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+              </svg>
+            </a>
+          </div>
           <div className="text-gray-600 space-y-2 text-sm">
             <p>• FlinkOMT 是 Apache Flink 的一个扩展，用于捕获数据库的变更数据</p>
             <p>• 本演示展示了如何使用 FlinkOMT 将数据从 StarRocks 实时同步到 OceanBase</p>
