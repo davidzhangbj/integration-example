@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import axios from 'axios'
 
 function FlinkOMTPage() {
@@ -9,12 +9,21 @@ function FlinkOMTPage() {
   const [sqlQuery, setSqlQuery] = useState({ starrocks: '', oceanbase: '' })
   const [queryResults, setQueryResults] = useState({ starrocks: null, oceanbase: null })
   const [queryLoading, setQueryLoading] = useState({ starrocks: false, oceanbase: false })
+  const [selectedDatabase, setSelectedDatabase] = useState({ starrocks: 'test1', oceanbase: 'test' })
+  const [databases, setDatabases] = useState({ starrocks: [], oceanbase: [] })
+  const [databaseLoading, setDatabaseLoading] = useState({ starrocks: false, oceanbase: false })
+  const [dropdownOpen, setDropdownOpen] = useState({ starrocks: false, oceanbase: false })
+  const dropdownRefs = {
+    starrocks: useRef(null),
+    oceanbase: useRef(null)
+  }
   const [connectionTestStatus, setConnectionTestStatus] = useState({ starrocks: null, oceanbase: null, flink: null })
   const [connectionTestLoading, setConnectionTestLoading] = useState({ starrocks: false, oceanbase: false, flink: false })
   const [config, setConfig] = useState({
     starrocks: {
       host: 'localhost',
       port: '9030',
+      scanPort: '8030',
       username: 'root',
       password: '123456',
       tables: 'test[1-2].orders[0-9]' // 迁移的表，格式可以是 db.table 或 db[1-2].table[1-2]
@@ -34,6 +43,29 @@ function FlinkOMTPage() {
     starrocks: false,
     oceanbase: false
   })
+
+  // 点击外部关闭下拉框
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (dropdownRefs.starrocks.current && !dropdownRefs.starrocks.current.contains(event.target)) {
+        setDropdownOpen(prev => ({ ...prev, starrocks: false }))
+      }
+      if (dropdownRefs.oceanbase.current && !dropdownRefs.oceanbase.current.contains(event.target)) {
+        setDropdownOpen(prev => ({ ...prev, oceanbase: false }))
+      }
+    }
+
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside)
+    }
+  }, [])
+
+  // 页面加载时自动获取数据库列表
+  useEffect(() => {
+    fetchDatabases('starrocks')
+    fetchDatabases('oceanbase')
+  }, [])
 
   const handleConfigChange = (section, field, value) => {
     setConfig(prev => ({
@@ -219,6 +251,33 @@ function FlinkOMTPage() {
     }
   }
 
+  const fetchDatabases = async (dbType) => {
+    setDatabaseLoading(prev => ({ ...prev, [dbType]: true }))
+    try {
+      const response = await axios.post('/api/execute-sql', {
+        dbType,
+        sql: 'SHOW DATABASES',
+        config: config[dbType]
+      })
+
+      if (response.data.success && response.data.rows) {
+        const dbList = response.data.rows.map(row => {
+          // 处理不同格式的返回结果
+          if (Array.isArray(row)) {
+            return row[0] || row['Database'] || row['database']
+          }
+          return row['Database'] || row['database'] || Object.values(row)[0]
+        }).filter(Boolean)
+        setDatabases(prev => ({ ...prev, [dbType]: dbList }))
+      }
+    } catch (error) {
+      console.error(`获取 ${dbType} 数据库列表失败:`, error)
+      // 如果获取失败，不影响使用，只是没有下拉选项
+    } finally {
+      setDatabaseLoading(prev => ({ ...prev, [dbType]: false }))
+    }
+  }
+
   const executeSql = async (dbType) => {
     const sql = sqlQuery[dbType].trim()
     if (!sql) {
@@ -230,9 +289,15 @@ function FlinkOMTPage() {
     setQueryResults(prev => ({ ...prev, [dbType]: null }))
 
     try {
+      // 如果选择了数据库，先执行 USE database
+      let finalSql = sql
+      if (selectedDatabase[dbType]) {
+        finalSql = `USE ${selectedDatabase[dbType]};\n${sql}`
+      }
+
       const response = await axios.post('/api/execute-sql', {
         dbType,
-        sql,
+        sql: finalSql,
         config: config[dbType]
       })
 
@@ -393,11 +458,20 @@ function FlinkOMTPage() {
                       />
                     </div>
                     <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">端口</label>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">MySQL 端口</label>
                       <input
                         type="text"
                         value={config.starrocks.port}
                         onChange={(e) => handleConfigChange('starrocks', 'port', e.target.value)}
+                        className="w-full px-3 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Scan 端口</label>
+                      <input
+                        type="text"
+                        value={config.starrocks.scanPort}
+                        onChange={(e) => handleConfigChange('starrocks', 'scanPort', e.target.value)}
                         className="w-full px-3 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                       />
                     </div>
@@ -596,16 +670,89 @@ function FlinkOMTPage() {
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                   {/* StarRocks Query */}
                   <div className="border rounded-lg p-4 bg-gray-50">
-                    <div className="mb-3">
+                    <div className="mb-3 flex items-center justify-between">
                       <h3 className="font-medium text-gray-800 flex items-center">
                         <span className="w-3 h-3 bg-blue-500 rounded-full mr-2"></span>
                         StarRocks
                       </h3>
+                      <button
+                        onClick={() => fetchDatabases('starrocks')}
+                        disabled={databaseLoading.starrocks}
+                        className="text-xs text-blue-600 hover:text-blue-800 disabled:opacity-50"
+                        title="刷新数据库列表"
+                      >
+                        {databaseLoading.starrocks ? '加载中...' : '刷新数据库'}
+                      </button>
+                    </div>
+                    <div className="mb-3">
+                      <label className="block text-sm font-medium text-gray-700 mb-2 flex items-center">
+                        <svg className="w-4 h-4 mr-1.5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" />
+                        </svg>
+                        选择数据库（可选）
+                      </label>
+                      <div className="relative" ref={dropdownRefs.starrocks}>
+                        <button
+                          type="button"
+                          onClick={() => setDropdownOpen(prev => ({ ...prev, starrocks: !prev.starrocks }))}
+                          className={`w-full px-4 py-2.5 pr-10 border-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm bg-white text-gray-700 font-medium cursor-pointer transition-all shadow-sm flex items-center justify-between ${
+                            dropdownOpen.starrocks 
+                              ? 'border-blue-500 shadow-md' 
+                              : 'border-gray-300 hover:border-blue-400'
+                          }`}
+                        >
+                          <span className="text-gray-900">
+                            {selectedDatabase.starrocks}
+                          </span>
+                          <svg 
+                            className={`w-5 h-5 text-gray-400 transition-transform ${dropdownOpen.starrocks ? 'transform rotate-180' : ''}`}
+                            fill="none" 
+                            stroke="currentColor" 
+                            viewBox="0 0 24 24"
+                          >
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                          </svg>
+                        </button>
+                        {selectedDatabase.starrocks && (
+                          <div className="absolute -top-1 -right-1 w-3 h-3 bg-blue-500 rounded-full border-2 border-white z-10"></div>
+                        )}
+                        {dropdownOpen.starrocks && (
+                          <div className="absolute z-50 w-full mt-1 bg-white border-2 border-gray-200 rounded-lg shadow-xl max-h-60 overflow-auto">
+                            {databases.starrocks.map((db, idx) => (
+                              <div
+                                key={idx}
+                                onClick={() => {
+                                  setSelectedDatabase(prev => ({ ...prev, starrocks: db }))
+                                  setDropdownOpen(prev => ({ ...prev, starrocks: false }))
+                                }}
+                                className={`px-4 py-2.5 cursor-pointer transition-colors ${
+                                  idx > 0 ? 'border-t border-gray-100' : ''
+                                } ${
+                                  selectedDatabase.starrocks === db
+                                    ? 'bg-blue-50 text-blue-700 font-medium'
+                                    : 'text-gray-700 hover:bg-gray-50'
+                                }`}
+                              >
+                                <div className="flex items-center justify-between">
+                                  <span>{db}</span>
+                                  {selectedDatabase.starrocks === db && (
+                                    <svg className="w-4 h-4 text-blue-600" fill="currentColor" viewBox="0 0 20 20">
+                                      <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                                    </svg>
+                                  )}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
                     </div>
                     <textarea
                       value={sqlQuery.starrocks}
                       onChange={(e) => setSqlQuery(prev => ({ ...prev, starrocks: e.target.value }))}
-                      placeholder="输入 SQL 语句，例如：SELECT * FROM test1.orders1 LIMIT 10"
+                      placeholder={selectedDatabase.starrocks 
+                        ? `已选择数据库: ${selectedDatabase.starrocks}\n输入 SQL 语句，例如：SELECT * FROM orders1 LIMIT 10`
+                        : "输入 SQL 语句，例如：SELECT * FROM test1.orders1 LIMIT 10"}
                       className="w-full px-3 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-sm"
                       rows="4"
                     />
@@ -621,16 +768,89 @@ function FlinkOMTPage() {
 
                   {/* OceanBase Query */}
                   <div className="border rounded-lg p-4 bg-gray-50">
-                    <div className="mb-3">
+                    <div className="mb-3 flex items-center justify-between">
                       <h3 className="font-medium text-gray-800 flex items-center">
                         <span className="w-3 h-3 bg-green-500 rounded-full mr-2"></span>
                         OceanBase
                       </h3>
+                      <button
+                        onClick={() => fetchDatabases('oceanbase')}
+                        disabled={databaseLoading.oceanbase}
+                        className="text-xs text-green-600 hover:text-green-800 disabled:opacity-50"
+                        title="刷新数据库列表"
+                      >
+                        {databaseLoading.oceanbase ? '加载中...' : '刷新数据库'}
+                      </button>
+                    </div>
+                    <div className="mb-3">
+                      <label className="block text-sm font-medium text-gray-700 mb-2 flex items-center">
+                        <svg className="w-4 h-4 mr-1.5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" />
+                        </svg>
+                        选择数据库（可选）
+                      </label>
+                      <div className="relative" ref={dropdownRefs.oceanbase}>
+                        <button
+                          type="button"
+                          onClick={() => setDropdownOpen(prev => ({ ...prev, oceanbase: !prev.oceanbase }))}
+                          className={`w-full px-4 py-2.5 pr-10 border-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-green-500 text-sm bg-white text-gray-700 font-medium cursor-pointer transition-all shadow-sm flex items-center justify-between ${
+                            dropdownOpen.oceanbase 
+                              ? 'border-green-500 shadow-md' 
+                              : 'border-gray-300 hover:border-green-400'
+                          }`}
+                        >
+                          <span className="text-gray-900">
+                            {selectedDatabase.oceanbase}
+                          </span>
+                          <svg 
+                            className={`w-5 h-5 text-gray-400 transition-transform ${dropdownOpen.oceanbase ? 'transform rotate-180' : ''}`}
+                            fill="none" 
+                            stroke="currentColor" 
+                            viewBox="0 0 24 24"
+                          >
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                          </svg>
+                        </button>
+                        {selectedDatabase.oceanbase && (
+                          <div className="absolute -top-1 -right-1 w-3 h-3 bg-green-500 rounded-full border-2 border-white z-10"></div>
+                        )}
+                        {dropdownOpen.oceanbase && (
+                          <div className="absolute z-50 w-full mt-1 bg-white border-2 border-gray-200 rounded-lg shadow-xl max-h-60 overflow-auto">
+                            {databases.oceanbase.map((db, idx) => (
+                              <div
+                                key={idx}
+                                onClick={() => {
+                                  setSelectedDatabase(prev => ({ ...prev, oceanbase: db }))
+                                  setDropdownOpen(prev => ({ ...prev, oceanbase: false }))
+                                }}
+                                className={`px-4 py-2.5 cursor-pointer transition-colors ${
+                                  idx > 0 ? 'border-t border-gray-100' : ''
+                                } ${
+                                  selectedDatabase.oceanbase === db
+                                    ? 'bg-green-50 text-green-700 font-medium'
+                                    : 'text-gray-700 hover:bg-gray-50'
+                                }`}
+                              >
+                                <div className="flex items-center justify-between">
+                                  <span>{db}</span>
+                                  {selectedDatabase.oceanbase === db && (
+                                    <svg className="w-4 h-4 text-green-600" fill="currentColor" viewBox="0 0 20 20">
+                                      <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                                    </svg>
+                                  )}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
                     </div>
                     <textarea
                       value={sqlQuery.oceanbase}
                       onChange={(e) => setSqlQuery(prev => ({ ...prev, oceanbase: e.target.value }))}
-                      placeholder="输入 SQL 语句，例如：SELECT * FROM test1.orders1 LIMIT 10"
+                      placeholder={selectedDatabase.oceanbase 
+                        ? `已选择数据库: ${selectedDatabase.oceanbase}\n输入 SQL 语句，例如：SELECT * FROM orders1 LIMIT 10`
+                        : "输入 SQL 语句，例如：SELECT * FROM test1.orders1 LIMIT 10"}
                       className="w-full px-3 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-green-500 font-mono text-sm"
                       rows="4"
                     />

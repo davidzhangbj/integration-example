@@ -35,3 +35,4 @@ logs/
 /tmp/
 *.tmp
 
+nohup.out

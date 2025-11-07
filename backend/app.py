@@ -416,10 +416,22 @@ def execute_sql():
         
         try:
             with connection.cursor() as cursor:
-                cursor.execute(sql)
+                # 支持多语句执行（用分号分隔）
+                statements = [s.strip() for s in sql.split(';') if s.strip()]
                 
-                # 判断是否是查询语句
-                sql_upper = sql.strip().upper()
+                if not statements:
+                    return jsonify({'error': 'SQL 语句不能为空'}), 400
+                
+                # 执行前面的语句（如 USE database）
+                for stmt in statements[:-1]:
+                    cursor.execute(stmt)
+                
+                # 执行最后一条语句（实际的 SQL）
+                final_sql = statements[-1]
+                cursor.execute(final_sql)
+                
+                # 判断最后一条语句是否是查询语句
+                sql_upper = final_sql.strip().upper()
                 if sql_upper.startswith('SELECT') or sql_upper.startswith('DESC') or sql_upper.startswith('DESCRIBE') or sql_upper.startswith('SHOW'):
                     # 查询语句，返回结果
                     results = cursor.fetchall()
