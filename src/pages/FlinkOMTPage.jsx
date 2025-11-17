@@ -1,6 +1,46 @@
 import { useState, useEffect, useRef } from 'react'
 import axios from 'axios'
 
+// 格式化日期时间为 YYYY-MM-DD HH:mm:ss.SSS 格式（东八区）
+function formatDateTime(date) {
+  let shanghaiDate
+  if (!date) {
+    // 如果没有提供日期，使用当前时间并转换为东八区
+    const now = new Date()
+    // 获取UTC时间戳
+    const utcTimestamp = now.getTime()
+    // 转换为东八区时间戳（UTC+8）
+    shanghaiDate = new Date(utcTimestamp + (8 * 60 * 60 * 1000))
+  } else if (typeof date === 'string') {
+    // 解析ISO格式字符串
+    // 如果ISO字符串包含时区信息（如 +08:00），Date会正确解析为UTC时间戳
+    const parsed = new Date(date)
+    // 获取UTC时间戳
+    const utcTimestamp = parsed.getTime()
+    // 检查ISO字符串是否已经包含时区信息
+    // 如果包含 +08:00，说明这是东八区时间，parsed已经是正确的UTC时间戳
+    // 要显示为东八区，需要从UTC时间戳加8小时
+    // 如果ISO字符串是UTC时间（Z结尾），也需要加8小时
+    // 无论哪种情况，都是：UTC时间戳 + 8小时 = 东八区显示时间
+    shanghaiDate = new Date(utcTimestamp + (8 * 60 * 60 * 1000))
+  } else {
+    // 如果已经是Date对象，转换为东八区
+    const utcTimestamp = date.getTime()
+    shanghaiDate = new Date(utcTimestamp + (8 * 60 * 60 * 1000))
+  }
+  
+  // 使用UTC方法获取年月日时分秒（因为我们已经手动加上了8小时偏移到时间戳中）
+  const year = shanghaiDate.getUTCFullYear()
+  const month = String(shanghaiDate.getUTCMonth() + 1).padStart(2, '0')
+  const day = String(shanghaiDate.getUTCDate()).padStart(2, '0')
+  const hours = String(shanghaiDate.getUTCHours()).padStart(2, '0')
+  const minutes = String(shanghaiDate.getUTCMinutes()).padStart(2, '0')
+  const seconds = String(shanghaiDate.getUTCSeconds()).padStart(2, '0')
+  const milliseconds = String(shanghaiDate.getUTCMilliseconds()).padStart(3, '0')
+  
+  return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}.${milliseconds}`
+}
+
 function FlinkOMTPage() {
   const [step, setStep] = useState(1) // 1: 配置, 2: 运行中, 3: 完成
   const [status, setStatus] = useState('idle') // idle, running, success, error
@@ -17,11 +57,13 @@ function FlinkOMTPage() {
     starrocks: useRef(null),
     oceanbase: useRef(null)
   }
+  const pollIntervalRef = useRef(null) // 存储轮询 interval ID
+  const startJobAbortControllerRef = useRef(null) // 存储启动任务的 AbortController，用于取消正在进行的启动请求
   const [connectionTestStatus, setConnectionTestStatus] = useState({ starrocks: null, oceanbase: null, flink: null })
   const [connectionTestLoading, setConnectionTestLoading] = useState({ starrocks: false, oceanbase: false, flink: false })
   const [config, setConfig] = useState({
     starrocks: {
-      host: 'localhost',
+      host: '192.168.112.2',
       port: '9030',
       scanPort: '8030',
       username: 'root',
@@ -29,9 +71,9 @@ function FlinkOMTPage() {
       tables: 'test[1-2].orders[0-9]' // 迁移的表，格式可以是 db.table 或 db[1-2].table[1-2]
     },
     oceanbase: {
-      host: 'localhost',
-      port: '2881',
-      username: 'root@test',
+      host: '192.168.112.1',
+      port: '9883',
+      username: 'test@sun',
       password: '123456'
     },
     flinkOMT: {
@@ -67,6 +109,16 @@ function FlinkOMTPage() {
     fetchDatabases('oceanbase')
   }, [])
 
+  // 组件卸载时清除轮询
+  useEffect(() => {
+    return () => {
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current)
+        pollIntervalRef.current = null
+      }
+    }
+  }, [])
+
   const handleConfigChange = (section, field, value) => {
     setConfig(prev => ({
       ...prev,
@@ -94,30 +146,74 @@ function FlinkOMTPage() {
   const startJob = async () => {
     if (!validateConfig()) return
 
+    // 如果已有正在进行的启动请求，先取消它
+    if (startJobAbortControllerRef.current) {
+      startJobAbortControllerRef.current.abort()
+    }
+
+    // 创建新的 AbortController
+    const abortController = new AbortController()
+    startJobAbortControllerRef.current = abortController
+
     setStatus('running')
     setStep(2)
-    setLogs([{ time: new Date().toLocaleTimeString(), message: '正在启动 FlinkOMT 任务...' }])
+    // 使用当前时间（前端本地时间），后续会统一使用服务器时间
+    setLogs([{ time: formatDateTime(), message: '正在启动 FlinkOMT 任务...' }])
 
     try {
-      const response = await axios.post('/api/start-job', config)
+      const response = await axios.post('/api/start-job', config, {
+        signal: abortController.signal
+      })
+      
+      // 检查是否已被取消
+      if (abortController.signal.aborted) {
+        return
+      }
+
       setJobId(response.data.jobId)
-      setLogs(prev => [...prev, {
-        time: new Date().toLocaleTimeString(),
-        message: `任务已提交，Job ID: ${response.data.jobId}`
-      }])
+      // 使用服务器返回的时间戳，保证时区一致
+      const serverTime = response.data.lastUpdate || new Date().toISOString()
+      setLogs(prev => {
+        // 更新最后一条日志（"正在启动"）的时间戳为服务器时间，保证时区一致
+        const updatedLogs = [...prev]
+        if (updatedLogs.length > 0) {
+          updatedLogs[updatedLogs.length - 1] = {
+            ...updatedLogs[updatedLogs.length - 1],
+            time: formatDateTime(serverTime)
+          }
+        }
+        // 添加服务器返回的日志
+        return [...updatedLogs, {
+          time: formatDateTime(serverTime),
+          message: response.data.logs.join('\n')
+        }]
+      })
       
       // 开始轮询任务状态
       pollJobStatus(response.data.jobId)
+      startJobAbortControllerRef.current = null // 启动成功，清除引用
     } catch (error) {
+      // 如果请求被取消，不更新状态
+      if (axios.isCancel(error) || error.name === 'AbortError' || abortController.signal.aborted) {
+        return
+      }
+      
       setStatus('error')
       setLogs(prev => [...prev, {
-        time: new Date().toLocaleTimeString(),
+        time: formatDateTime(),
         message: `错误: ${error.response?.data?.error || error.message}`
       }])
+      startJobAbortControllerRef.current = null // 出错后清除引用
     }
   }
 
   const pollJobStatus = async (id) => {
+    // 如果已有轮询，先清除
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current)
+      pollIntervalRef.current = null
+    }
+
     const interval = setInterval(async () => {
       try {
         const response = await axios.get(`/api/job-status/${id}`)
@@ -127,9 +223,12 @@ function FlinkOMTPage() {
           const newLogs = [...prev]
           if (jobStatus.logs && jobStatus.logs.length > 0) {
             jobStatus.logs.forEach(log => {
-              if (!newLogs.find(l => l.message === log && l.time === jobStatus.lastUpdate)) {
+              // 只根据 message 去重，避免重复添加相同的日志
+              // 检查最后几条日志中是否已有相同的消息，避免重复
+              const recentLogs = newLogs.slice(-10) // 只检查最近10条日志
+              if (!recentLogs.find(l => l.message === log)) {
                 newLogs.push({
-                  time: jobStatus.lastUpdate || new Date().toLocaleTimeString(),
+                  time: formatDateTime(jobStatus.lastUpdate),
                   message: log
                 })
               }
@@ -144,34 +243,77 @@ function FlinkOMTPage() {
           setStatus('success')
           setStep(3)
           clearInterval(interval)
+          pollIntervalRef.current = null
         } else if (jobStatus.status === 'FAILED' || jobStatus.status === 'CANCELED') {
           setStatus('error')
           clearInterval(interval)
+          pollIntervalRef.current = null
         }
       } catch (error) {
         console.error('获取任务状态失败:', error)
       }
     }, 2000) // 每2秒查询一次
 
+    // 保存 interval ID 到 ref
+    pollIntervalRef.current = interval
+
     // 10分钟后停止轮询
-    setTimeout(() => clearInterval(interval), 600000)
+    setTimeout(() => {
+      if (pollIntervalRef.current === interval) {
+        clearInterval(interval)
+        pollIntervalRef.current = null
+      }
+    }, 600000)
   }
 
   const stopJob = async () => {
-    if (!jobId) return
+    // 如果任务正在启动中（没有 jobId 但状态是 running），取消启动请求
+    if (!jobId && status === 'running') {
+      if (startJobAbortControllerRef.current) {
+        startJobAbortControllerRef.current.abort()
+        startJobAbortControllerRef.current = null
+      }
+      setStatus('idle')
+      setStep(1)
+      setLogs([{ time: formatDateTime(), message: '任务启动已取消' }])
+      return
+    }
+
+    // 如果没有 jobId，无法停止
+    if (!jobId) {
+      return
+    }
+
+    // 清除轮询
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current)
+      pollIntervalRef.current = null
+    }
 
     try {
       await axios.post(`/api/stop-job/${jobId}`)
       setStatus('idle')
       setStep(1)
       setJobId(null)
-      setLogs([{ time: new Date().toLocaleTimeString(), message: '任务已停止' }])
+      setLogs([{ time: formatDateTime(), message: '任务已停止' }])
     } catch (error) {
       alert(`停止任务失败: ${error.response?.data?.error || error.message}`)
     }
   }
 
   const reset = () => {
+    // 取消正在进行的启动请求
+    if (startJobAbortControllerRef.current) {
+      startJobAbortControllerRef.current.abort()
+      startJobAbortControllerRef.current = null
+    }
+
+    // 清除轮询
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current)
+      pollIntervalRef.current = null
+    }
+    
     setStep(1)
     setStatus('idle')
     setJobId(null)
@@ -896,18 +1038,12 @@ function FlinkOMTPage() {
                 </div>
               </div>
 
-              <div className="flex justify-center space-x-4">
+              <div className="flex justify-center">
                 <button
                   onClick={stopJob}
                   className="px-6 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
                 >
                   停止任务
-                </button>
-                <button
-                  onClick={reset}
-                  className="px-6 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition-colors"
-                >
-                  重置
                 </button>
               </div>
             </div>

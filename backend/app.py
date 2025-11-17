@@ -1,16 +1,21 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os
-import json
 import subprocess
-import threading
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import pymysql
 import pymysql.cursors
 import re
 import requests
+
+# 东八区时区（上海时区）
+TZ_SHANGHAI = timezone(timedelta(hours=8))
+
+def get_shanghai_time():
+    """获取东八区（上海）当前时间"""
+    return datetime.now(TZ_SHANGHAI)
 
 app = Flask(__name__)
 CORS(app)
@@ -20,7 +25,7 @@ jobs = {}
 
 # Flink 相关配置
 FLINK_HOME = os.getenv('FLINK_HOME', '/root/flink/flink-1.19.1')
-FLINK_REST_URL = os.getenv('FLINK_REST_URL', 'http://localhost:8081')
+FLINK_REST_URL = os.getenv('FLINK_REST_URL', 'http://jobmanager:8081')
 
 def extract_flink_job_id(output):
     """从 Flink 命令输出中提取 Job ID"""
@@ -60,12 +65,7 @@ def generate_flinkomt_config(config):
     oceanbase_url = f"jdbc:mysql://{oceanbase.get('host', '127.0.0.1')}:{oceanbase.get('port', '2881')}/test"
     
     # FlinkOMT YAML 配置
-    yaml_content = f"""################################################################################
-
-# Description: Sync StarRocks all tables to OceanBase
-
-################################################################################
-
+    yaml_content = f"""
 source:
   type: starrocks
   jdbc-url: {starrocks_jdbc_url}
@@ -93,6 +93,7 @@ def start_job():
     try:
         config = request.json
         job_id = str(uuid.uuid4())
+        print('job_id: ', job_id)
         
         # 生成 FlinkOMT YAML 配置文件
         yaml_content = generate_flinkomt_config(config)
@@ -113,6 +114,7 @@ def start_job():
         flink_cmd = [
             f'{FLINK_HOME}/bin/flink',
             'run',
+            '-m', 'jobmanager:8081',
             '-d',  # 后台运行
             '-D', f'execution.checkpointing.interval={checkpoint_interval_sec}s',
             '-D', f'parallelism.default={parallelism}',
@@ -155,19 +157,25 @@ def start_job():
             logs = [f'任务提交时出错: {str(e)}']
         
         # 初始化任务状态
-        jobs[job_id] = {
-            'id': job_id,
+        jobs[flink_job_id] = {
+            'job_id': flink_job_id,
             'status': 'SUBMITTED',
             'config': config,
             'config_file': config_file,
             'process': process,
-            'flink_job_id': flink_job_id,
             'logs': logs,
-            'start_time': datetime.now().isoformat(),
-            'last_update': datetime.now().isoformat()
+            'last_log_count': len(logs),  # 记录上次返回的日志数量
+            'last_status': 'SUBMITTED',  # 记录上次的状态，用于避免重复添加状态日志
+            'start_time': get_shanghai_time().isoformat(),
+            'last_update': get_shanghai_time().isoformat()
         }
         
-        return jsonify({'jobId': job_id, 'status': 'submitted'})
+        return jsonify({
+            'jobId': flink_job_id, 
+            'status': 'submitted',
+            'logs': logs,
+            'lastUpdate': get_shanghai_time().isoformat()  # 返回东八区时间戳
+        })
     
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -181,33 +189,57 @@ def job_status(job_id):
     
     try:
         # 尝试从 Flink REST API 获取任务状态
-        if job.get('flink_job_id'):
-            response = requests.get(f'{FLINK_REST_URL}/jobs/{job["flink_job_id"]}')
+        if job.get('job_id'):
+            response = requests.get(f'{FLINK_REST_URL}/jobs/{job["job_id"]}')
             if response.status_code == 200:
                 job_data = response.json()
                 state = job_data.get('state', 'UNKNOWN')
+                previous_status = job.get('last_status', '')
+                
+                # 更新状态
                 job['status'] = state
+                
+                # 对于 RUNNING 状态，每次轮询都添加日志，让用户知道任务在运行
                 if state == 'RUNNING':
                     job['logs'].append('任务正在运行中...')
-                elif state == 'FINISHED':
-                    job['logs'].append('任务已完成！')
-                elif state == 'FAILED':
-                    job['logs'].append('任务执行失败')
+                    job['last_status'] = state
+                # 对于其他状态，只在状态变化时添加日志
+                elif state != previous_status:
+                    job['last_status'] = state
+                    if state == 'FINISHED':
+                        job['logs'].append('任务已完成！')
+                    elif state == 'FAILED':
+                        job['logs'].append('任务执行失败')
+                    elif state == 'CANCELED':
+                        job['logs'].append('任务已取消')
         else:
             # 没有 flink_job_id，返回无任务在执行
-            job['status'] = 'NO_JOB'
-            job['logs'].append('无任务在执行')
+            previous_status = job.get('last_status', '')
+            if previous_status != 'NO_JOB':
+                job['status'] = 'NO_JOB'
+                job['last_status'] = 'NO_JOB'
+                job['logs'].append('无任务在执行')
             
-        job['last_update'] = datetime.now().isoformat()
+        job['last_update'] = get_shanghai_time().isoformat()
     except Exception as e:
-        job['logs'].append(f'监控错误: {str(e)}')
+        error_msg = f'监控错误: {str(e)}'
+        # 避免重复添加相同的错误日志
+        if not job.get('logs') or job['logs'][-1] != error_msg:
+            job['logs'].append(error_msg)
+    
+    # 只返回新增的日志（从上次返回的位置开始）
+    last_log_count = job.get('last_log_count', 0)
+    all_logs = job.get('logs', [])
+    new_logs = all_logs[last_log_count:]
+    
+    # 更新上次返回的日志数量
+    job['last_log_count'] = len(all_logs)
     
     # 返回任务状态信息
     return jsonify({
-        'jobId': job['id'],
+        'jobId': job['job_id'],
         'status': job['status'],
-        'flinkJobId': job.get('flink_job_id'),
-        'logs': job.get('logs', []),
+        'logs': new_logs,  # 只返回新增的日志
         'startTime': job.get('start_time'),
         'lastUpdate': job.get('last_update')
     })
@@ -219,26 +251,109 @@ def stop_job(job_id):
         return jsonify({'error': '任务不存在'}), 404
     
     job = jobs[job_id]
+    flink_job_id = job.get('job_id')
+    
+    if not flink_job_id:
+        job['status'] = 'CANCELED'
+        job['logs'].append('任务已停止（无 Flink Job ID）')
+        return jsonify({'status': 'stopped'})
     
     try:
-        # 停止 Flink 任务
-        if job.get('flink_job_id'):
-            requests.post(f'{FLINK_REST_URL}/jobs/{job["flink_job_id"]}/yarn-cancel')
+        # 发送取消请求 - 使用 GET 方法访问 yarn-cancel 端点
+        cancel_url = f'{FLINK_REST_URL}/jobs/{flink_job_id}/yarn-cancel'
+        response = requests.get(cancel_url, timeout=30)
         
-        # 终止进程
+        if response.status_code not in [200, 202]:
+            # 如果 GET yarn-cancel 失败，尝试标准的 PATCH cancel 端点
+            cancel_url = f'{FLINK_REST_URL}/jobs/{flink_job_id}/cancel'
+            response = requests.patch(cancel_url, headers={'Content-Type': 'application/json'}, timeout=30)
+            
+            if response.status_code not in [200, 202]:
+                error_msg = f'取消 Flink 任务失败: HTTP {response.status_code}'
+                try:
+                    error_detail = response.json().get('errors', [])
+                    if error_detail:
+                        error_msg += f' - {error_detail[0] if isinstance(error_detail, list) else error_detail}'
+                except:
+                    error_msg += f' - {response.text[:200]}'
+                job['logs'].append(error_msg)
+                return jsonify({'error': error_msg}), 500
+        
+        job['logs'].append('已发送取消请求到 Flink 集群')
+        
+        # 等待任务真正取消，最多等待 30 秒
+        max_wait_time = 30
+        check_interval = 1
+        waited_time = 0
+        last_state = None
+        
+        while waited_time < max_wait_time:
+            try:
+                status_response = requests.get(f'{FLINK_REST_URL}/jobs/{flink_job_id}', timeout=5)
+                if status_response.status_code == 200:
+                    job_data = status_response.json()
+                    state = job_data.get('state', 'UNKNOWN')
+                    
+                    # 只在状态变化时记录日志，避免重复
+                    if state != last_state:
+                        last_state = state
+                        if state in ['CANCELED', 'FAILED', 'FINISHED']:
+                            job['status'] = state
+                            job['logs'].append(f'任务已成功取消，最终状态: {state}')
+                            break
+                        elif state == 'CANCELLING':
+                            job['logs'].append('任务正在取消中...')
+                    elif state in ['CANCELED', 'FAILED', 'FINISHED']:
+                        break
+                elif status_response.status_code == 404:
+                    # 任务不存在，可能已经取消
+                    job['logs'].append('任务已不存在，可能已成功取消')
+                    break
+            except requests.exceptions.RequestException:
+                # 请求失败，可能任务已经不存在
+                if waited_time > 5:  # 至少等待 5 秒后再判断
+                    job['logs'].append('无法连接到 Flink REST API，可能任务已取消')
+                    break
+            
+            time.sleep(check_interval)
+            waited_time += check_interval
+        
+        if waited_time >= max_wait_time and job.get('status') not in ['CANCELED', 'FAILED', 'FINISHED']:
+            job['logs'].append('等待任务取消超时，但取消请求已发送')
+        
+        # 终止进程（如果存在）
         if job.get('process'):
-            job['process'].terminate()
+            try:
+                job['process'].terminate()
+                try:
+                    job['process'].wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    job['process'].kill()
+            except Exception as e:
+                job['logs'].append(f'终止进程时出错: {str(e)}')
         
-        job['status'] = 'CANCELED'
-        job['logs'].append('任务已停止')
+        # 更新状态为已取消
+        if job.get('status') not in ['CANCELED', 'FAILED', 'FINISHED']:
+            job['status'] = 'CANCELED'
         
         # 清理配置文件
-        if os.path.exists(job.get('config_file')):
-            os.remove(job['config_file'])
+        config_file = job.get('config_file', '')
+        if config_file and os.path.exists(config_file):
+            try:
+                os.remove(config_file)
+            except Exception as e:
+                job['logs'].append(f'清理配置文件时出错: {str(e)}')
         
         return jsonify({'status': 'stopped'})
+        
+    except requests.exceptions.RequestException as e:
+        error_msg = f'请求 Flink REST API 失败: {str(e)}'
+        job['logs'].append(error_msg)
+        return jsonify({'error': error_msg}), 500
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        error_msg = f'停止任务时出错: {str(e)}'
+        job['logs'].append(error_msg)
+        return jsonify({'error': error_msg}), 500
 
 @app.route('/api/health', methods=['GET'])
 def health():
