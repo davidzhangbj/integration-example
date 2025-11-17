@@ -1063,7 +1063,7 @@ function FlinkOMTPage() {
                 onClick={reset}
                 className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
               >
-                重新开始
+                返回配置页面
               </button>
             </div>
           )}
@@ -1089,9 +1089,9 @@ function FlinkOMTPage() {
             </a>
           </div>
           <div className="text-gray-600 space-y-2 text-sm">
-            <p>• FlinkOMT 是 Apache Flink 的一个扩展，用于捕获数据库的变更数据</p>
-            <p>• 本演示展示了如何使用 FlinkOMT 将数据从 StarRocks 实时同步到 OceanBase</p>
-            <p>• 支持全量同步和增量同步，可以实时捕获源数据库的变更</p>
+          <p>• FlinkOMT 是 Apache Flink 的一个扩展，用于捕获源端数据库的全量数据导入到 OceanBase，支持自动建表、表结构转换、多库多表同步、多库多表路由同步</p>
+          <p>• 支持的源端数据源：StarRocks、ClickHouse、Doris</p>
+          <p>• 本演示展示了如何使用 FlinkOMT 将数据从 StarRocks 同步到 OceanBase</p>
           </div>
         </div>
       </div>
